@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>wt — WebTransport Test Client</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 20px; }
+        h1 { color: #58a6ff; margin-bottom: 10px; font-size: 18px; }
+        .section { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin-bottom: 12px; }
+        .section h2 { color: #8b949e; font-size: 13px; text-transform: uppercase; margin-bottom: 8px; }
+        label { display: block; color: #8b949e; font-size: 12px; margin-bottom: 4px; }
+        input, select { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 6px 10px; border-radius: 4px; font-family: monospace; width: 100%; margin-bottom: 8px; }
+        button { background: #238636; border: none; color: #fff; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: monospace; margin-right: 4px; margin-bottom: 4px; }
+        button:hover { background: #2ea043; }
+        button.danger { background: #da3633; }
+        button.danger:hover { background: #f85149; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #log { background: #0d1117; border: 1px solid #30363d; border-radius: 4px; padding: 10px; height: 300px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+        .log-info { color: #58a6ff; }
+        .log-send { color: #3fb950; }
+        .log-recv { color: #d2a8ff; }
+        .log-error { color: #f85149; }
+        .log-system { color: #8b949e; }
+        .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+        .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+        .status.connected { background: #3fb950; }
+        .status.disconnected { background: #f85149; }
+        .row { display: flex; gap: 8px; }
+        .row > * { flex: 1; }
+    </style>
+</head>
+<body>
+    <h1>wt — WebTransport Test Client</h1>
+
+    <div class="section">
+        <h2>Connection</h2>
+        <div class="row">
+            <div>
+                <label>Server URL</label>
+                <input id="url" value="https://localhost:4433/echo" placeholder="https://host:port/path">
+            </div>
+            <div>
+                <label>Certificate Hash (hex, for self-signed)</label>
+                <input id="certHash" placeholder="paste sha256 hash from server output">
+            </div>
+        </div>
+        <div class="controls">
+            <button id="btnConnect" onclick="connect()">Connect</button>
+            <button id="btnDisconnect" onclick="disconnect()" class="danger" disabled>Disconnect</button>
+            <span id="statusIndicator"><span class="status disconnected"></span>Disconnected</span>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Streams</h2>
+        <div class="row">
+            <div>
+                <label>Message</label>
+                <input id="streamMsg" value="hello webtransport!" placeholder="message to send">
+            </div>
+        </div>
+        <div class="controls">
+            <button onclick="sendStream()" disabled id="btnSendStream">Send via Stream (reliable)</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Datagrams</h2>
+        <div class="row">
+            <div>
+                <label>Message</label>
+                <input id="dgMsg" value="ping" placeholder="datagram to send">
+            </div>
+        </div>
+        <div class="controls">
+            <button onclick="sendDatagram()" disabled id="btnSendDG">Send Datagram (unreliable)</button>
+            <button onclick="startPing()" disabled id="btnPing">Start 10Hz Ping</button>
+            <button onclick="stopPing()" disabled id="btnStopPing" class="danger">Stop Ping</button>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Log</h2>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        let transport = null;
+        let pingInterval = null;
+
+        function log(msg, cls = 'log-info') {
+            const el = document.getElementById('log');
+            const ts = new Date().toLocaleTimeString();
+            el.innerHTML += `<div class="${cls}">[${ts}] ${msg}</div>`;
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function setConnected(connected) {
+            document.getElementById('btnConnect').disabled = connected;
+            document.getElementById('btnDisconnect').disabled = !connected;
+            document.getElementById('btnSendStream').disabled = !connected;
+            document.getElementById('btnSendDG').disabled = !connected;
+            document.getElementById('btnPing').disabled = !connected;
+
+            const indicator = document.getElementById('statusIndicator');
+            if (connected) {
+                indicator.innerHTML = '<span class="status connected"></span>Connected';
+            } else {
+                indicator.innerHTML = '<span class="status disconnected"></span>Disconnected';
+            }
+        }
+
+        function hexToBytes(hex) {
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+            }
+            return bytes;
+        }
+
+        async function connect() {
+            const url = document.getElementById('url').value;
+            const certHash = document.getElementById('certHash').value.trim();
+
+            log(`Connecting to ${url}...`, 'log-system');
+
+            const opts = {};
+            if (certHash) {
+                opts.serverCertificateHashes = [{
+                    algorithm: 'sha-256',
+                    value: hexToBytes(certHash).buffer
+                }];
+            }
+
+            try {
+                transport = new WebTransport(url, opts);
+                await transport.ready;
+                log('Connected!', 'log-info');
+                setConnected(true);
+
+                // Read incoming datagrams
+                readDatagrams();
+                // Read incoming streams
+                readStreams();
+
+                transport.closed.then(() => {
+                    log('Connection closed', 'log-system');
+                    setConnected(false);
+                    transport = null;
+                }).catch(err => {
+                    log(`Connection error: ${err}`, 'log-error');
+                    setConnected(false);
+                    transport = null;
+                });
+
+            } catch (err) {
+                log(`Failed to connect: ${err}`, 'log-error');
+            }
+        }
+
+        function disconnect() {
+            stopPing();
+            if (transport) {
+                transport.close();
+                transport = null;
+            }
+            setConnected(false);
+            log('Disconnected', 'log-system');
+        }
+
+        async function sendStream() {
+            if (!transport) return;
+            const msg = document.getElementById('streamMsg').value;
+            const encoder = new TextEncoder();
+            const decoder = new TextDecoder();
+
+            try {
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+
+                // Write length-prefixed message (4 bytes BE length + payload)
+                const payload = encoder.encode(msg);
+                const header = new ArrayBuffer(4);
+                new DataView(header).setUint32(0, payload.length, false);
+
+                await writer.write(new Uint8Array(header));
+                await writer.write(payload);
+                log(`Stream TX: ${msg}`, 'log-send');
+
+                // Read response
+                const reader = stream.readable.getReader();
+                // Read 4-byte header
+                let headerBuf = new Uint8Array(4);
+                let offset = 0;
+                while (offset < 4) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    headerBuf.set(value.slice(0, 4 - offset), offset);
+                    offset += value.length;
+                }
+                const respLen = new DataView(headerBuf.buffer).getUint32(0, false);
+
+                // Read payload
+                let respBuf = new Uint8Array(respLen);
+                offset = 0;
+                while (offset < respLen) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    respBuf.set(value.slice(0, respLen - offset), offset);
+                    offset += value.length;
+                }
+
+                log(`Stream RX: ${decoder.decode(respBuf)}`, 'log-recv');
+
+                writer.close();
+                reader.releaseLock();
+            } catch (err) {
+                log(`Stream error: ${err}`, 'log-error');
+            }
+        }
+
+        async function sendDatagram() {
+            if (!transport) return;
+            const msg = document.getElementById('dgMsg').value;
+            const encoder = new TextEncoder();
+
+            try {
+                const writer = transport.datagrams.writable.getWriter();
+                await writer.write(encoder.encode(msg));
+                writer.releaseLock();
+                log(`Datagram TX: ${msg}`, 'log-send');
+            } catch (err) {
+                log(`Datagram error: ${err}`, 'log-error');
+            }
+        }
+
+        async function readDatagrams() {
+            if (!transport) return;
+            const decoder = new TextDecoder();
+            const reader = transport.datagrams.readable.getReader();
+
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    log(`Datagram RX: ${decoder.decode(value)}`, 'log-recv');
+                }
+            } catch (err) {
+                // Connection closed
+            }
+        }
+
+        async function readStreams() {
+            if (!transport) return;
+            const reader = transport.incomingBidirectionalStreams.getReader();
+            const decoder = new TextDecoder();
+
+            try {
+                while (true) {
+                    const { value: stream, done } = await reader.read();
+                    if (done) break;
+
+                    // Read from incoming stream
+                    (async () => {
+                        const r = stream.readable.getReader();
+                        try {
+                            while (true) {
+                                const { value, done } = await r.read();
+                                if (done) break;
+                                log(`Incoming Stream RX: ${decoder.decode(value)}`, 'log-recv');
+                            }
+                        } catch (err) {}
+                    })();
+                }
+            } catch (err) {
+                // Connection closed
+            }
+        }
+
+        function startPing() {
+            if (pingInterval) return;
+            const encoder = new TextEncoder();
+            let seq = 0;
+
+            document.getElementById('btnPing').disabled = true;
+            document.getElementById('btnStopPing').disabled = false;
+
+            pingInterval = setInterval(async () => {
+                if (!transport) { stopPing(); return; }
+                try {
+                    const writer = transport.datagrams.writable.getWriter();
+                    const msg = `ping-${seq++}`;
+                    await writer.write(encoder.encode(msg));
+                    writer.releaseLock();
+                } catch (err) {
+                    stopPing();
+                }
+            }, 100); // 10 Hz
+            log('Started 10Hz ping', 'log-system');
+        }
+
+        function stopPing() {
+            if (pingInterval) {
+                clearInterval(pingInterval);
+                pingInterval = null;
+                log('Stopped ping', 'log-system');
+            }
+            document.getElementById('btnPing').disabled = false;
+            document.getElementById('btnStopPing').disabled = true;
+        }
+    </script>
+</body>
+</html>

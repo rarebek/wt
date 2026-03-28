@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>wt Chat — WebTransport Demo</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, monospace; background: #0d1117; color: #c9d1d9; display: flex; flex-direction: column; height: 100vh; }
+        .header { padding: 12px 16px; background: #161b22; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 12px; }
+        .header h1 { font-size: 14px; color: #58a6ff; }
+        .header input { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 4px 8px; border-radius: 4px; font-family: monospace; width: 300px; }
+        .header button { background: #238636; border: none; color: #fff; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-family: monospace; }
+        .header button.danger { background: #da3633; }
+        .header .status { width: 8px; height: 8px; border-radius: 50%; background: #f85149; }
+        .header .status.on { background: #3fb950; }
+        #messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+        .msg { padding: 4px 0; font-size: 13px; line-height: 1.5; }
+        .msg .user { color: #58a6ff; font-weight: bold; }
+        .msg .system { color: #8b949e; font-style: italic; }
+        .msg .text { color: #c9d1d9; }
+        .input-bar { padding: 12px 16px; background: #161b22; border-top: 1px solid #30363d; display: flex; gap: 8px; }
+        .input-bar input { flex: 1; background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 4px; font-family: monospace; }
+        .input-bar button { background: #238636; border: none; color: #fff; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-family: monospace; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>wt chat</h1>
+        <input id="url" value="https://localhost:4433/chat/lobby" placeholder="server URL">
+        <input id="certHash" placeholder="cert hash" style="width: 200px;">
+        <input id="username" placeholder="your name" style="width: 120px;" value="">
+        <button onclick="connect()" id="btnConnect">Connect</button>
+        <button onclick="disconnect()" class="danger" id="btnDisconnect" style="display:none">Leave</button>
+        <div class="status" id="indicator"></div>
+    </div>
+
+    <div id="messages"></div>
+
+    <div class="input-bar">
+        <input id="msgInput" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendMsg()">
+        <button onclick="sendMsg()">Send</button>
+    </div>
+
+    <script>
+        let transport = null;
+        const username = () => document.getElementById('username').value || 'anon';
+
+        function addMsg(user, text, isSystem) {
+            const el = document.getElementById('messages');
+            const cls = isSystem ? 'system' : 'text';
+            const userHtml = isSystem ? '' : `<span class="user">${user}:</span> `;
+            el.innerHTML += `<div class="msg">${userHtml}<span class="${cls}">${text}</span></div>`;
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function hexToBytes(hex) {
+            return new Uint8Array(hex.match(/.{1,2}/g).map(b => parseInt(b, 16)));
+        }
+
+        async function connect() {
+            const url = document.getElementById('url').value;
+            const hash = document.getElementById('certHash').value.trim();
+            const opts = {};
+            if (hash) {
+                opts.serverCertificateHashes = [{ algorithm: 'sha-256', value: hexToBytes(hash).buffer }];
+            }
+
+            try {
+                transport = new WebTransport(url, opts);
+                await transport.ready;
+                document.getElementById('indicator').classList.add('on');
+                document.getElementById('btnConnect').style.display = 'none';
+                document.getElementById('btnDisconnect').style.display = '';
+                addMsg('', `Connected to ${url}`, true);
+
+                // Read incoming datagrams (broadcast messages)
+                const reader = transport.datagrams.readable.getReader();
+                (async () => {
+                    const decoder = new TextDecoder();
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        try {
+                            const msg = JSON.parse(decoder.decode(value));
+                            if (msg.user && msg.user !== username()) {
+                                addMsg(msg.user, msg.text);
+                            }
+                        } catch {}
+                    }
+                })();
+
+                transport.closed.then(() => {
+                    addMsg('', 'Disconnected', true);
+                    document.getElementById('indicator').classList.remove('on');
+                    document.getElementById('btnConnect').style.display = '';
+                    document.getElementById('btnDisconnect').style.display = 'none';
+                });
+            } catch (e) {
+                addMsg('', `Connection failed: ${e}`, true);
+            }
+        }
+
+        function disconnect() {
+            if (transport) transport.close();
+        }
+
+        async function sendMsg() {
+            const input = document.getElementById('msgInput');
+            const text = input.value.trim();
+            if (!text || !transport) return;
+
+            const msg = JSON.stringify({ user: username(), text });
+            const encoder = new TextEncoder();
+
+            try {
+                const stream = await transport.createBidirectionalStream();
+                const writer = stream.writable.getWriter();
+                const payload = encoder.encode(msg);
+                const header = new ArrayBuffer(4);
+                new DataView(header).setUint32(0, payload.length, false);
+                await writer.write(new Uint8Array(header));
+                await writer.write(payload);
+                await writer.close();
+                addMsg(username(), text);
+                input.value = '';
+            } catch (e) {
+                addMsg('', `Send failed: ${e}`, true);
+            }
+        }
+    </script>
+</body>
+</html>
