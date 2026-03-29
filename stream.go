@@ -11,8 +11,9 @@ import (
 
 // Stream wraps a bidirectional WebTransport stream with framing and helpers.
 type Stream struct {
-	raw *webtransport.Stream
-	ctx *Context
+	raw    *webtransport.Stream
+	ctx    *Context
+	hdrBuf [4]byte // reusable header buffer for ReadMessage
 }
 
 func newStream(s *webtransport.Stream, ctx *Context) *Stream {
@@ -76,11 +77,10 @@ func (s *Stream) WriteMessage(data []byte) error {
 
 // ReadMessage reads a length-prefixed message from the stream.
 func (s *Stream) ReadMessage() ([]byte, error) {
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(s.raw, header); err != nil {
+	if _, err := io.ReadFull(s.raw, s.hdrBuf[:]); err != nil {
 		return nil, err
 	}
-	length := binary.BigEndian.Uint32(header)
+	length := binary.BigEndian.Uint32(s.hdrBuf[:])
 	if length > uint32(MaxMessageSize) {
 		return nil, fmt.Errorf("wt: message too large: %d > %d", length, MaxMessageSize)
 	}
