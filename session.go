@@ -1,6 +1,8 @@
 package wt
 
 import (
+	"iter"
+	"log/slog"
 	"sync"
 )
 
@@ -103,11 +105,11 @@ func (ss *SessionStore) CloseAll() {
 
 // Room represents a named group of sessions for pub/sub messaging.
 type Room struct {
-	mu       sync.RWMutex
-	name     string
-	members  map[string]*Context
-	onJoin   func(*Context)
-	onLeave  func(*Context)
+	mu      sync.RWMutex
+	name    string
+	members map[string]*Context
+	onJoin  func(*Context)
+	onLeave func(*Context)
 }
 
 // RoomManager manages named rooms.
@@ -255,4 +257,174 @@ func (r *Room) OnLeave(fn func(*Context)) {
 	r.mu.Lock()
 	r.onLeave = fn
 	r.mu.Unlock()
+}
+
+// Filter returns sessions matching a predicate.
+func (ss *SessionStore) Filter(fn func(*Context) bool) []*Context {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	var result []*Context
+	for _, ctx := range ss.sessions {
+		if fn(ctx) {
+			result = append(result, ctx)
+		}
+	}
+	return result
+}
+
+// CountWhere returns the number of sessions matching a predicate.
+func (ss *SessionStore) CountWhere(fn func(*Context) bool) int {
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	n := 0
+	for _, ctx := range ss.sessions {
+		if fn(ctx) {
+			n++
+		}
+	}
+	return n
+}
+
+// Sessions returns an iterator over all active sessions.
+// Use with Go 1.23+ range-over-func:
+//
+//	for ctx := range server.Sessions().All() {
+//	    log.Println(ctx.ID())
+//	}
+func (ss *SessionStore) All() iter.Seq[*Context] {
+	return func(yield func(*Context) bool) {
+		ss.mu.RLock()
+		defer ss.mu.RUnlock()
+		for _, ctx := range ss.sessions {
+			if !yield(ctx) {
+				return
+			}
+		}
+	}
+}
+
+// FilterMembers returns room members matching a predicate.
+func (r *Room) FilterMembers(fn func(*Context) bool) []*Context {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var result []*Context
+	for _, ctx := range r.members {
+		if fn(ctx) {
+			result = append(result, ctx)
+		}
+	}
+	return result
+}
+
+// Has checks if a session is in the room.
+func (r *Room) Has(sessionID string) bool {
+	r.mu.RLock()
+	_, ok := r.members[sessionID]
+	r.mu.RUnlock()
+	return ok
+}
+
+// All returns an iterator over all room names.
+func (rm *RoomManager) All() iter.Seq2[string, *Room] {
+	return func(yield func(string, *Room) bool) {
+		rm.mu.RLock()
+		defer rm.mu.RUnlock()
+		for name, room := range rm.rooms {
+			if !yield(name, room) {
+				return
+			}
+		}
+	}
+}
+
+// MembersIter returns an iterator over room members.
+func (r *Room) MembersIter() iter.Seq[*Context] {
+	return func(yield func(*Context) bool) {
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		for _, ctx := range r.members {
+			if !yield(ctx) {
+				return
+			}
+		}
+	}
+}
+
+// BroadcastStream sends a message to all room members via reliable streams.
+// Unlike Broadcast (datagrams, unreliable), this guarantees delivery.
+// Each member gets a new stream with the message.
+func (r *Room) BroadcastStream(data []byte) {
+	r.ForEach(func(c *Context) {
+		go func() {
+			stream, err := c.OpenStream()
+			if err != nil {
+				return
+			}
+			_ = stream.WriteMessage(data)
+			stream.Close()
+		}()
+	})
+}
+
+// BroadcastStreamExcept sends a reliable message to all except the given session.
+func (r *Room) BroadcastStreamExcept(data []byte, excludeID string) {
+	r.ForEach(func(c *Context) {
+		if c.ID() == excludeID {
+			return
+		}
+		go func() {
+			stream, err := c.OpenStream()
+			if err != nil {
+				return
+			}
+			_ = stream.WriteMessage(data)
+			stream.Close()
+		}()
+	})
+}
+
+// SafeBroadcast sends a datagram to all room members, recovering from panics.
+// Logs and skips any member that causes a panic (e.g., closed connection).
+func (r *Room) SafeBroadcast(data []byte, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	r.ForEach(func(c *Context) {
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.Warn("broadcast panic recovered",
+						"session", c.ID(),
+						"room", r.Name(),
+						"panic", rec,
+					)
+				}
+			}()
+			_ = c.SendDatagram(data)
+		}()
+	})
+}
+
+// SafeBroadcastExcept is SafeBroadcast but excludes the given session.
+func (r *Room) SafeBroadcastExcept(data []byte, excludeID string, logger *slog.Logger) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	r.ForEach(func(c *Context) {
+		if c.ID() == excludeID {
+			return
+		}
+		func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					logger.Warn("broadcast panic recovered",
+						"session", c.ID(),
+						"room", r.Name(),
+						"panic", rec,
+					)
+				}
+			}()
+			_ = c.SendDatagram(data)
+		}()
+	})
 }

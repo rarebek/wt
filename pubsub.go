@@ -1,6 +1,11 @@
 package wt
 
-import "sync"
+import (
+	"iter"
+	"sync"
+
+	"github.com/rarebek/wt/codec"
+)
 
 // PubSub provides topic-based publish/subscribe messaging.
 // Sessions subscribe to topics and receive datagrams published to those topics.
@@ -105,4 +110,139 @@ func (ps *PubSub) TopicsForSession(sessionID string) []string {
 		}
 	}
 	return topics
+}
+
+// PersistentPubSub extends PubSub with per-topic message history.
+// When a client subscribes, they can replay messages they missed.
+type PersistentPubSub struct {
+	*PubSub
+	mu      sync.RWMutex
+	history map[string]*RingBuffer[[]byte] // topic -> message history
+	maxHist int
+}
+
+// NewPersistentPubSub creates a pub/sub with per-topic history.
+func NewPersistentPubSub(historyPerTopic int) *PersistentPubSub {
+	return &PersistentPubSub{
+		PubSub:  NewPubSub(),
+		history: make(map[string]*RingBuffer[[]byte]),
+		maxHist: historyPerTopic,
+	}
+}
+
+// PublishPersistent publishes to subscribers AND stores in history.
+func (pps *PersistentPubSub) PublishPersistent(topic string, data []byte) {
+	pps.mu.Lock()
+	if pps.history[topic] == nil {
+		pps.history[topic] = NewRingBuffer[[]byte](pps.maxHist)
+	}
+	pps.history[topic].Push(data)
+	pps.mu.Unlock()
+
+	pps.PubSub.Publish(topic, data)
+}
+
+// Replay sends all stored history for a topic to the given session.
+func (pps *PersistentPubSub) Replay(topic string, c *Context) {
+	pps.mu.RLock()
+	rb, ok := pps.history[topic]
+	pps.mu.RUnlock()
+
+	if !ok {
+		return
+	}
+
+	for _, msg := range rb.Items() {
+		_ = c.SendDatagram(msg)
+	}
+}
+
+// HistoryLen returns the number of stored messages for a topic.
+func (pps *PersistentPubSub) HistoryLen(topic string) int {
+	pps.mu.RLock()
+	defer pps.mu.RUnlock()
+	rb, ok := pps.history[topic]
+	if !ok {
+		return 0
+	}
+	return rb.Len()
+}
+
+// ClearHistory removes all stored messages for a topic.
+func (pps *PersistentPubSub) ClearHistory(topic string) {
+	pps.mu.Lock()
+	delete(pps.history, topic)
+	pps.mu.Unlock()
+}
+
+// TypedPubSub provides type-safe publish/subscribe with automatic encoding.
+type TypedPubSub[T any] struct {
+	ps    *PubSub
+	codec codec.Codec
+}
+
+// NewTypedPubSub wraps a PubSub with typed messages.
+func NewTypedPubSub[T any](ps *PubSub, c codec.Codec) *TypedPubSub[T] {
+	return &TypedPubSub[T]{ps: ps, codec: c}
+}
+
+// Publish encodes and publishes a message to all subscribers of a topic.
+func (tp *TypedPubSub[T]) Publish(topic string, msg T) error {
+	data, err := tp.codec.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	tp.ps.Publish(topic, data)
+	return nil
+}
+
+// PublishExcept encodes and publishes to all except one session.
+func (tp *TypedPubSub[T]) PublishExcept(topic string, msg T, excludeID string) error {
+	data, err := tp.codec.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	tp.ps.PublishExcept(topic, data, excludeID)
+	return nil
+}
+
+// Subscribe delegates to the underlying PubSub.
+func (tp *TypedPubSub[T]) Subscribe(topic string, c *Context) {
+	tp.ps.Subscribe(topic, c)
+}
+
+// Unsubscribe delegates to the underlying PubSub.
+func (tp *TypedPubSub[T]) Unsubscribe(topic string, c *Context) {
+	tp.ps.Unsubscribe(topic, c)
+}
+
+// UnsubscribeAll delegates to the underlying PubSub.
+func (tp *TypedPubSub[T]) UnsubscribeAll(c *Context) {
+	tp.ps.UnsubscribeAll(c)
+}
+
+// TopicsIter returns an iterator over pub/sub topics and subscriber counts.
+func (ps *PubSub) TopicsIter() iter.Seq2[string, int] {
+	return func(yield func(string, int) bool) {
+		ps.mu.RLock()
+		defer ps.mu.RUnlock()
+		for topic, subs := range ps.subscribers {
+			if !yield(topic, len(subs)) {
+				return
+			}
+		}
+	}
+}
+
+// TagsIter returns an iterator over all tags and their session counts.
+func (t *Tags) TagsIter() iter.Seq2[string, int] {
+	return func(yield func(string, int) bool) {
+		t.mu.RLock()
+		defer t.mu.RUnlock()
+		for tag, sessions := range t.tags {
+			if !yield(tag, len(sessions)) {
+				return
+			}
+		}
+	}
 }

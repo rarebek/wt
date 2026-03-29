@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/quic-go/webtransport-go"
 )
@@ -197,4 +199,64 @@ func generateSessionID(s *webtransport.Session) string {
 func CertFingerprint(certDER []byte) string {
 	hash := sha256.Sum256(certDER)
 	return hex.EncodeToString(hash[:])
+}
+
+// ConnInfo provides detailed connection information for a session.
+type ConnInfo struct {
+	SessionID   string            `json:"session_id"`
+	RemoteAddr  string            `json:"remote_addr"`
+	LocalAddr   string            `json:"local_addr"`
+	Path        string            `json:"path"`
+	Params      map[string]string `json:"params,omitempty"`
+	ConnectedAt time.Time         `json:"connected_at"`
+	Transport   string            `json:"transport"` // "webtransport" or "websocket"
+	UserAgent   string            `json:"user_agent,omitempty"`
+	Origin      string            `json:"origin,omitempty"`
+}
+
+// Info returns connection information for the session.
+func (c *Context) Info() ConnInfo {
+	info := ConnInfo{
+		SessionID:  c.ID(),
+		RemoteAddr: c.RemoteAddr().String(),
+		LocalAddr:  c.LocalAddr().String(),
+		Path:       c.Request().URL.Path,
+		Params:     c.Params(),
+		Transport:  "webtransport",
+		UserAgent:  c.Request().UserAgent(),
+		Origin:     c.Request().Header.Get("Origin"),
+	}
+
+	if t, ok := c.Get("_connected_at"); ok {
+		info.ConnectedAt = t.(time.Time)
+	}
+
+	return info
+}
+
+// InfoJSON returns connection info as a JSON string.
+func (c *Context) InfoJSON() string {
+	data, _ := json.Marshal(c.Info())
+	return string(data)
+}
+
+// SendBatch sends multiple datagrams in rapid succession.
+// More efficient than calling SendDatagram in a loop because
+// it reduces lock contention on the underlying QUIC connection.
+func (c *Context) SendBatch(messages [][]byte) int {
+	sent := 0
+	for _, msg := range messages {
+		if err := c.SendDatagram(msg); err != nil {
+			break
+		}
+		sent++
+	}
+	return sent
+}
+
+// SendBatchRoom sends multiple datagrams to all room members.
+func (r *Room) SendBatch(messages [][]byte) {
+	for _, msg := range messages {
+		r.Broadcast(msg)
+	}
 }

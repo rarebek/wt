@@ -16,9 +16,11 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
 )
@@ -369,4 +371,201 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	return s.Close()
+}
+
+// AltSvcHeader returns the Alt-Svc HTTP header value that tells browsers
+// to upgrade from HTTP/2 to HTTP/3 for WebTransport.
+//
+// Browsers use this header to discover that a server supports HTTP/3.
+// Include it in your HTTP/1.1 or HTTP/2 responses.
+//
+// Usage:
+//
+//	// On your HTTP/1.1 or HTTP/2 server:
+//	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+//	    wt.SetAltSvcHeader(w, 4433) // WebTransport on port 4433
+//	    // ... serve regular HTTP
+//	})
+func AltSvcHeader(port int) string {
+	return fmt.Sprintf(`h3=":%d"; ma=86400`, port)
+}
+
+// SetAltSvcHeader sets the Alt-Svc header on an HTTP response.
+func SetAltSvcHeader(w http.ResponseWriter, port int) {
+	w.Header().Set("Alt-Svc", AltSvcHeader(port))
+}
+
+// AltSvcMiddleware returns an HTTP middleware that adds the Alt-Svc header
+// to every response, advertising HTTP/3 availability.
+func AltSvcMiddleware(port int) func(http.Handler) http.Handler {
+	header := AltSvcHeader(port)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Alt-Svc", header)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// QUICConfig exposes QUIC-level tuning options.
+// These are passed to the underlying quic-go transport.
+type QUICConfig struct {
+	// InitialStreamReceiveWindow is the initial flow control window for each stream (default: 512KB).
+	// Increase for high-throughput streams. quic-go auto-tunes up to MaxStreamReceiveWindow.
+	InitialStreamReceiveWindow uint64
+
+	// MaxStreamReceiveWindow is the maximum stream flow control window (default: 6MB).
+	MaxStreamReceiveWindow uint64
+
+	// InitialConnectionReceiveWindow is the initial connection-level flow control window (default: 768KB).
+	InitialConnectionReceiveWindow uint64
+
+	// MaxConnectionReceiveWindow is the max connection-level flow control window (default: 15MB).
+	MaxConnectionReceiveWindow uint64
+
+	// MaxIncomingStreams is the maximum number of concurrent incoming streams per session.
+	// Default: 100 in quic-go.
+	MaxIncomingStreams int64
+
+	// MaxIncomingUniStreams is the max number of concurrent incoming unidirectional streams.
+	MaxIncomingUniStreams int64
+}
+
+// DefaultQUICConfig returns sensible defaults for most applications.
+func DefaultQUICConfig() QUICConfig {
+	return QUICConfig{
+		InitialStreamReceiveWindow:     512 * 1024,       // 512 KB
+		MaxStreamReceiveWindow:         6 * 1024 * 1024,  // 6 MB
+		InitialConnectionReceiveWindow: 768 * 1024,       // 768 KB
+		MaxConnectionReceiveWindow:     15 * 1024 * 1024, // 15 MB
+		MaxIncomingStreams:             100,
+		MaxIncomingUniStreams:          100,
+	}
+}
+
+// GameServerQUICConfig returns config optimized for game servers:
+// smaller windows (less buffering = lower latency), more streams.
+func GameServerQUICConfig() QUICConfig {
+	return QUICConfig{
+		InitialStreamReceiveWindow:     64 * 1024,   // 64 KB — small for low latency
+		MaxStreamReceiveWindow:         256 * 1024,  // 256 KB
+		InitialConnectionReceiveWindow: 128 * 1024,  // 128 KB
+		MaxConnectionReceiveWindow:     1024 * 1024, // 1 MB
+		MaxIncomingStreams:             200,         // more streams for game events
+		MaxIncomingUniStreams:          50,
+	}
+}
+
+// HighThroughputQUICConfig returns config optimized for large transfers:
+// bigger windows, fewer streams.
+func HighThroughputQUICConfig() QUICConfig {
+	return QUICConfig{
+		InitialStreamReceiveWindow:     2 * 1024 * 1024,  // 2 MB
+		MaxStreamReceiveWindow:         16 * 1024 * 1024, // 16 MB
+		InitialConnectionReceiveWindow: 4 * 1024 * 1024,  // 4 MB
+		MaxConnectionReceiveWindow:     32 * 1024 * 1024, // 32 MB
+		MaxIncomingStreams:             50,
+		MaxIncomingUniStreams:          20,
+	}
+}
+
+// toQuicConfig converts to quic-go's Config type.
+func (c QUICConfig) toQuicConfig() *quic.Config {
+	return &quic.Config{
+		InitialStreamReceiveWindow:     c.InitialStreamReceiveWindow,
+		MaxStreamReceiveWindow:         c.MaxStreamReceiveWindow,
+		InitialConnectionReceiveWindow: c.InitialConnectionReceiveWindow,
+		MaxConnectionReceiveWindow:     c.MaxConnectionReceiveWindow,
+		MaxIncomingStreams:             c.MaxIncomingStreams,
+		MaxIncomingUniStreams:          c.MaxIncomingUniStreams,
+	}
+}
+
+// WithQUICConfig sets QUIC-level transport options.
+func WithQUICConfig(cfg QUICConfig) Option {
+	return func(s *Server) {
+		s.quicConfig = &cfg
+	}
+}
+
+// PreflightCheck verifies the server configuration before starting.
+// Returns a list of issues found. Empty list = ready to start.
+//
+// Usage:
+//
+//	server := wt.New(...)
+//	if issues := server.Preflight(); len(issues) > 0 {
+//	    for _, issue := range issues {
+//	        log.Printf("WARN: %s", issue)
+//	    }
+//	}
+func (s *Server) Preflight() []string {
+	var issues []string
+
+	// Check address format
+	host, port, err := net.SplitHostPort(s.addr)
+	if err != nil {
+		issues = append(issues, fmt.Sprintf("invalid address %q: %v", s.addr, err))
+		return issues // can't continue without valid address
+	}
+	_ = host
+
+	// Check port availability
+	conn, err := net.ListenPacket("udp", s.addr)
+	if err != nil {
+		issues = append(issues, fmt.Sprintf("port %s unavailable: %v", port, err))
+	} else {
+		conn.Close()
+	}
+
+	// Check TLS configuration
+	hasTLS := false
+	if s.autoTLS != nil {
+		hasTLS = true
+	}
+	if s.autocertManager != nil {
+		hasTLS = true
+	}
+	if s.certRotator != nil {
+		hasTLS = true
+	}
+	if s.tlsCert != "" && s.tlsKey != "" {
+		hasTLS = true
+		// Try to load the certificate files
+		_, err := tls.LoadX509KeyPair(s.tlsCert, s.tlsKey)
+		if err != nil {
+			issues = append(issues, fmt.Sprintf("TLS cert error: %v", err))
+		}
+	}
+
+	if !hasTLS {
+		issues = append(issues, "no TLS configuration: use WithTLS(), WithSelfSignedTLS(), WithAutoCert(), or WithCertRotator()")
+	}
+
+	// Check for common misconfigurations
+	if port == "443" && s.autoTLS == nil && s.autocertManager == nil {
+		issues = append(issues, "port 443 usually requires proper TLS certificates (not self-signed)")
+	}
+
+	// Warn about self-signed certs in non-dev settings
+	if s.autoTLS != nil && !strings.Contains(s.addr, "localhost") && !strings.Contains(s.addr, "127.0.0.1") {
+		issues = append(issues, "self-signed TLS is for development only — use WithTLS() or WithAutoCert() in production")
+	}
+
+	return issues
+}
+
+// PreflightResult holds the result of a preflight check.
+type PreflightResult struct {
+	Ready  bool
+	Issues []string
+}
+
+// PreflightCheck runs the preflight check and returns a structured result.
+func (s *Server) PreflightCheck() PreflightResult {
+	issues := s.Preflight()
+	return PreflightResult{
+		Ready:  len(issues) == 0,
+		Issues: issues,
+	}
 }

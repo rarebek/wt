@@ -12,7 +12,7 @@ import (
 func ServerInfo() map[string]string {
 	return map[string]string{
 		"framework":  "wt",
-		"version":    Version,
+		"version":    "0.1.0-dev",
 		"go_version": runtime.Version(),
 		"os":         runtime.GOOS,
 		"arch":       runtime.GOARCH,
