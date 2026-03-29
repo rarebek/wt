@@ -86,7 +86,7 @@ func matchPattern(pattern, path string) (map[string]string, bool) {
 	pattern = strings.Trim(pattern, "/")
 	path = strings.Trim(path, "/")
 
-	params := make(map[string]string, 2)
+	var params map[string]string
 	pi, pj := 0, 0
 
 	for pi < len(pattern) && pj < len(path) {
@@ -101,7 +101,10 @@ func matchPattern(pattern, path string) (map[string]string, bool) {
 		// Check for catch-all wildcard: {name...}
 		if len(pSeg) > 5 && pSeg[0] == '{' && pSeg[len(pSeg)-4:] == "...}" {
 			name := pSeg[1 : len(pSeg)-4]
-			params[name] = path[pj:] // capture rest of path
+			if params == nil {
+				params = make(map[string]string, 1)
+			}
+			params[name] = path[pj:]
 			return params, true
 		}
 
@@ -114,6 +117,9 @@ func matchPattern(pattern, path string) (map[string]string, bool) {
 		pathSeg := path[pj:je]
 
 		if len(pSeg) > 2 && pSeg[0] == '{' && pSeg[len(pSeg)-1] == '}' {
+			if params == nil {
+				params = make(map[string]string, 2)
+			}
 			params[pSeg[1:len(pSeg)-1]] = pathSeg
 		} else if pSeg != pathSeg {
 			return nil, false
@@ -131,6 +137,9 @@ func matchPattern(pattern, path string) (map[string]string, bool) {
 		return nil, false
 	}
 
+	if params == nil {
+		params = make(map[string]string)
+	}
 	return params, true
 }
 
