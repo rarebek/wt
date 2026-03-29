@@ -51,7 +51,9 @@ func NewTicker(c *Context, interval time.Duration, getData func() []byte) *Ticke
 
 // Stop stops the ticker.
 func (t *Ticker) Stop() {
-	t.ticker.Stop()
+	if t.ticker != nil {
+		t.ticker.Stop()
+	}
 	select {
 	case <-t.done:
 	default:
