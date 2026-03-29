@@ -11,6 +11,9 @@ type Route struct {
 	Handler    HandlerFunc
 	Middleware []MiddlewareFunc
 	params     []string // parameter names extracted from pattern
+	trimmed    string   // pattern with slashes trimmed (cached)
+	segments   int      // segment count (cached)
+	hasCatchAll bool    // true if pattern has {param...}
 }
 
 // Router handles path-based routing for WebTransport sessions.
@@ -30,11 +33,15 @@ func (r *Router) Add(pattern string, handler HandlerFunc, mw ...MiddlewareFunc) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	trimmed := strings.Trim(pattern, "/")
 	route := &Route{
-		Pattern:    pattern,
-		Handler:    handler,
-		Middleware: mw,
-		params:     extractParamNames(pattern),
+		Pattern:     pattern,
+		Handler:     handler,
+		Middleware:  mw,
+		params:      extractParamNames(pattern),
+		trimmed:     trimmed,
+		segments:    countSegments(trimmed),
+		hasCatchAll: strings.Contains(pattern, "...}"),
 	}
 	r.routes = append(r.routes, route)
 }
