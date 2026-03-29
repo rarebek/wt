@@ -23,3 +23,7 @@ Thumbs.db
 
 # Go
 vendor/
+
+# Autoresearch
+results.tsv
+run.log
