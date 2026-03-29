@@ -13,7 +13,7 @@ import (
 type Stream struct {
 	raw    *webtransport.Stream
 	ctx    *Context
-	hdrBuf [4]byte // reusable header buffer for ReadMessage
+	hdrBuf [4]byte // reusable header buffer for Read/WriteMessage
 }
 
 func newStream(s *webtransport.Stream, ctx *Context) *Stream {
@@ -62,13 +62,13 @@ func (s *Stream) SetWriteDeadline(t time.Time) error {
 
 // WriteMessage writes a length-prefixed message to the stream.
 // Format: [4 bytes big-endian length][payload]
+// Uses embedded header buffer to avoid allocation.
 func (s *Stream) WriteMessage(data []byte) error {
 	if len(data) > MaxMessageSize {
 		return fmt.Errorf("wt: message too large: %d > %d", len(data), MaxMessageSize)
 	}
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	if _, err := s.raw.Write(header); err != nil {
+	binary.BigEndian.PutUint32(s.hdrBuf[:], uint32(len(data)))
+	if _, err := s.raw.Write(s.hdrBuf[:]); err != nil {
 		return err
 	}
 	_, err := s.raw.Write(data)
@@ -106,7 +106,8 @@ const MaxMessageSize = 16 * 1024 * 1024
 
 // SendStream wraps a unidirectional send stream.
 type SendStream struct {
-	raw *webtransport.SendStream
+	raw    *webtransport.SendStream
+	hdrBuf [4]byte
 }
 
 // Write writes bytes to the send stream.
@@ -119,9 +120,8 @@ func (s *SendStream) WriteMessage(data []byte) error {
 	if len(data) > MaxMessageSize {
 		return fmt.Errorf("wt: message too large: %d > %d", len(data), MaxMessageSize)
 	}
-	header := make([]byte, 4)
-	binary.BigEndian.PutUint32(header, uint32(len(data)))
-	if _, err := s.raw.Write(header); err != nil {
+	binary.BigEndian.PutUint32(s.hdrBuf[:], uint32(len(data)))
+	if _, err := s.raw.Write(s.hdrBuf[:]); err != nil {
 		return err
 	}
 	_, err := s.raw.Write(data)
@@ -145,7 +145,8 @@ func (s *SendStream) CancelWrite(code uint32) {
 
 // ReceiveStream wraps a unidirectional receive stream.
 type ReceiveStream struct {
-	raw *webtransport.ReceiveStream
+	raw    *webtransport.ReceiveStream
+	hdrBuf [4]byte
 }
 
 // Read reads bytes from the receive stream.
@@ -155,11 +156,10 @@ func (s *ReceiveStream) Read(b []byte) (int, error) {
 
 // ReadMessage reads a length-prefixed message.
 func (s *ReceiveStream) ReadMessage() ([]byte, error) {
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(s.raw, header); err != nil {
+	if _, err := io.ReadFull(s.raw, s.hdrBuf[:]); err != nil {
 		return nil, err
 	}
-	length := binary.BigEndian.Uint32(header)
+	length := binary.BigEndian.Uint32(s.hdrBuf[:])
 	if length > uint32(MaxMessageSize) {
 		return nil, fmt.Errorf("wt: message too large: %d > %d", length, MaxMessageSize)
 	}

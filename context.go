@@ -135,7 +135,7 @@ func (c *Context) AcceptUniStream() (*ReceiveStream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ReceiveStream{s}, nil
+	return &ReceiveStream{raw: s}, nil
 }
 
 // OpenUniStream opens a unidirectional stream to the client (send only).
@@ -144,7 +144,7 @@ func (c *Context) OpenUniStream() (*SendStream, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &SendStream{s}, nil
+	return &SendStream{raw: s}, nil
 }
 
 // SendDatagram sends an unreliable datagram to the client.
