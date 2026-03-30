@@ -277,13 +277,11 @@ hub.Broadcast("update", data)
 
 ## WebTransport vs WebSocket
 
-WebSocket is mature and fast. WebTransport is newer and solves different problems. Pick the right one:
+Different tools for different jobs.
 
-**Use WebSocket when:** you need one data channel, you're on a reliable LAN, or you need Safari support today.
+**WebSocket:** one reliable bidirectional channel over TCP. Mature, works everywhere including Safari. Good for chat, notifications, simple real-time updates.
 
-**Use WebTransport when:** you need multiple independent channels, unreliable datagrams, mobile clients on lossy networks, or you want to avoid head-of-line blocking.
-
-WebTransport runs over QUIC in userspace. WebSocket runs over TCP with decades of kernel optimization. On localhost with zero packet loss, WebSocket will be faster. On real networks with packet loss, WebTransport avoids the head-of-line blocking that freezes all WebSocket data when a single packet is retransmitted.
+**WebTransport:** multiple independent streams + unreliable datagrams over QUIC. No head-of-line blocking between streams. Good for games, live collaboration, IoT, anything that needs parallel data channels or fire-and-forget messages.
 
 ## Production
 
