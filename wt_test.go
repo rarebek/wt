@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"os"
 	"net/http/httptest"
 	"runtime"
 	"sync"
@@ -1430,6 +1431,9 @@ func TestChaosRandomDisconnects(t *testing.T) {
 func TestScale100Sessions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping scale test in short mode")
+	}
+	if os.Getenv("CI") != "" {
+		t.Skip("skipping scale test in CI (UDP buffer too small)")
 	}
 
 	l, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
