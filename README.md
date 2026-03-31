@@ -328,6 +328,12 @@ middleware/    50+ middleware components
 fallback/      WebSocket and SSE fallback
 ```
 
+## Used by
+
+Nobody yet. Be the first.
+
+If you're using `wt` in a project, [open an issue](https://github.com/rarebek/wt/issues/new?title=Using+wt+in+my+project&body=Project+name+and+short+description) and I'll add you here.
+
 ## License
 
 MIT

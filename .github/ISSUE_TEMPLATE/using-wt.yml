@@ -1,0 +1,31 @@
+name: "I'm using wt"
+description: Let us know you're using wt and get listed in the README
+title: "Using wt in [project name]"
+labels: ["used-by"]
+body:
+  - type: input
+    id: project
+    attributes:
+      label: Project name
+      placeholder: e.g. my-game-server
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: Project URL (optional)
+      placeholder: e.g. https://github.com/you/project
+  - type: textarea
+    id: description
+    attributes:
+      label: What are you building?
+      placeholder: One or two sentences about what you're using wt for
+    validations:
+      required: true
+  - type: input
+    id: github
+    attributes:
+      label: Your GitHub username
+      placeholder: e.g. @rarebek
+    validations:
+      required: true
